@@ -22,11 +22,12 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 from io import BytesIO
-import os
 from random import randint
 import time
 
-from discord import Embed, File
+from typing import Tuple
+
+from discord import Embed, File, Message
 from discord.ext import commands
 from PIL import Image
 
@@ -37,8 +38,24 @@ class Images(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    def _shifter(self, attachment_bytes: bytes, size: tuple, filename: str):
-        image_obj = Image.open(BytesIO(attachment_bytes))
+    async def _load_attachment(message: Message) -> Tuple[BytesIO, str, Tuple[int, int]]:
+        attachment_file = BytesIO()
+
+        if len(message.attachments) == 0:
+            await message.author.avatar_url_as(size=1024, format='png').save(attachment_file)
+            filename = message.author.display_name + '.png'
+            file_size = (1024, 1024)
+
+        else:
+            target = message.attachments[0]
+            await target.save(attachment_file)
+            filename = target.filename
+            file_size = (target.width, target.height)
+
+        return attachment_file, filename, file_size
+
+    def _shifter(self, attachment_file: BytesIO, size: tuple) -> BytesIO:
+        image_obj = Image.open(attachment_file)
 
         bands = image_obj.split()
 
@@ -62,32 +79,53 @@ class Images(commands.Cog):
 
         new_image = Image.merge('RGB', (new_red, new_green, new_blue))
 
-        new_image.save(fp=filename)
-        return
+        out_file = BytesIO()
+        new_image.save(out_file)
+        out_file.seek(0)
+        return out_file
+
+    async def _jpeg(self, attachment_file: BytesIO) -> BytesIO:
+        image_obj = Image.open(attachment_file)
+
+        out_file = BytesIO()
+        image_obj.save(out_file, format='JPEG', quality=1)
+        out_file.seek(0)
+        return out_file
+
+    @commands.command()
+    @commands.cooldown(1, 10, commands.BucketType.user)
+    @commands.max_concurrency(1, commands.BucketType.guild, wait=False)
+    async def needsmorejpeg(self, ctx: commands.Context):
+        """JPEGIfyies an attached image or the author's profile picture"""
+        attachment_file, filename, _ = await self._load_attachment(ctx.message)
+
+        start_time = time.time()
+        new_file = await self.bot.loop.run_in_executor(
+            None, self._jpeg, attachment_file)
+        end_time = time.time()
+
+        new_image = File(new_file, filename)
+
+        embed = Embed(title="", colour=randint(0, 0xffffff))
+        embed.set_footer(
+            text=f"JPEGifying that image took : {end_time-start_time}")
+        embed.set_image(url=f"attachment://{filename}")
+
+        await ctx.send(embed=embed, file=new_image)
 
     @commands.command()
     @commands.cooldown(1, 10, commands.BucketType.user)
     @commands.max_concurrency(1, commands.BucketType.guild, wait=False)
     async def shift(self, ctx: commands.Context):
         """Shifts the RGB bands in an attached image or the author's profile picture"""
-        if len(ctx.message.attachments) == 0:
-            attachment_bytes = await ctx.author.avatar_url_as(size=1024, format='png').read()
-            filename = ctx.author.display_name + '.png'
-            file_size = (1024, 1024)
-
-        else:
-            target = ctx.message.attachments[0]
-            attachment_bytes = await target.read()
-            filename = target.filename
-            file_size = (target.width, target.height)
+        attachment_file, filename, file_size = await self._load_attachment(ctx.message)
 
         start_time = time.time()
-        await self.bot.loop.run_in_executor(
-            None, self._shifter, attachment_bytes, file_size, filename)
+        new_file = await self.bot.loop.run_in_executor(
+            None, self._shifter, attachment_file, file_size)
         end_time = time.time()
 
-        new_image = File(fp=filename)
-        os.remove(filename)
+        new_image = File(new_file, filename)
 
         embed = Embed(title="", colour=randint(0, 0xffffff))
         embed.set_footer(
